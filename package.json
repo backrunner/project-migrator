@@ -1,0 +1,66 @@
+{
+  "name": "@backrunner/project-migrator",
+  "type": "module",
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.24.0",
+  "description": "CLI for migrating project directories to another location while keeping a symlink at the original path, with optional watch mode and Codex history migration integration.",
+  "author": "BackRunner <dev@backrunner.top>",
+  "license": "MIT",
+  "homepage": "https://github.com/backrunner/project-migrator#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/backrunner/project-migrator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/backrunner/project-migrator/issues"
+  },
+  "keywords": [
+    "migrate",
+    "project",
+    "symlink",
+    "watch",
+    "codex",
+    "cli"
+  ],
+  "main": "./bin/cli.cjs",
+  "module": "./bin/cli.mjs",
+  "bin": {
+    "project-migrate": "./bin/cli.mjs"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "rollup -c rollup.config.ts --configPlugin typescript",
+    "watch": "rollup -c rollup.config.ts --configPlugin typescript --watch",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "chalk": "^5.6.2",
+    "chokidar": "^5.0.0",
+    "commander": "^15.0.0"
+  },
+  "devDependencies": {
+    "@antfu/eslint-config": "^9.1.0",
+    "@babel/core": "^8.0.1",
+    "@babel/preset-env": "^8.0.2",
+    "@babel/preset-typescript": "^8.0.1",
+    "@rollup/plugin-babel": "^7.1.0",
+    "@rollup/plugin-json": "^6.1.0",
+    "@rollup/plugin-node-resolve": "^16.0.3",
+    "@rollup/plugin-typescript": "^12.3.0",
+    "@types/node": "^26.1.0",
+    "eslint": "^10.6.0",
+    "eslint-plugin-format": "^2.0.1",
+    "prettier": "^3.9.4",
+    "rollup": "^4.62.2",
+    "tslib": "^2.8.1",
+    "typescript": "^6.0.3"
+  }
+}

@@ -1,0 +1,30 @@
+# Source and build tooling
+src/
+*.ts
+rollup.config.*
+tsconfig.json
+eslint.config.*
+
+# Package manager and local workspace state
+pnpm-lock.yaml
+pnpm-workspace.yaml
+node_modules/
+*.tgz
+
+# Repo/editor metadata
+.git/
+.github/
+.history/
+.vscode/
+.editorconfig
+.gitignore
+.npmignore
+AGENTS.md
+
+# Local environment and generated reports
+.env
+.env.*
+*.log
+coverage/
+.nyc_output/
+.DS_Store
