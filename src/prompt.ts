@@ -1,4 +1,4 @@
-import type { MigrateOptions, MigrationPlan } from './types.js'
+import type { MigrateOptions, MigrationPlan, SyncOptions, SyncPlan } from './types.js'
 import process from 'node:process'
 import { createInterface } from 'node:readline/promises'
 
@@ -50,6 +50,21 @@ export async function confirmMigrationPlan(plan: MigrationPlan, opts: PromptOpti
   return askYesNo('Proceed with this migration?')
 }
 
+export async function confirmSyncPlan(plan: SyncPlan, opts: SyncOptions): Promise<boolean> {
+  if (opts.yes || opts.dryRun) {
+    return true
+  }
+
+  requirePromptable('cannot confirm sync')
+  printSyncPlan(plan, opts)
+
+  const creates = plan.entries.filter(entry => entry.state === 'missing').length
+  const replacements = opts.force
+    ? plan.entries.filter(entry => entry.state === 'conflict').length
+    : 0
+  return askYesNo(`Create ${creates + replacements} symlink(s)?`)
+}
+
 function printMigrationPlan(plan: MigrationPlan, opts: PromptOptions): void {
   const targetStatus = plan.targetExists
     ? opts.force ? 'exists; will be replaced because --force was passed' : 'exists'
@@ -66,6 +81,24 @@ function printMigrationPlan(plan: MigrationPlan, opts: PromptOptions): void {
     `  Target parent: ${plan.targetParent} (${parentStatus})`,
     `  Symlink:       ${plan.symlink} -> ${plan.target}`,
     `  Codex:         ${codexStatus}`,
+    '',
+  ].join('\n'))
+}
+
+function printSyncPlan(plan: SyncPlan, opts: SyncOptions): void {
+  const missing = plan.entries.filter(entry => entry.state === 'missing')
+  const linked = plan.entries.filter(entry => entry.state === 'linked')
+  const conflicts = plan.entries.filter(entry => entry.state === 'conflict')
+  const actions = opts.force ? [...missing, ...conflicts] : missing
+
+  process.stdout.write([
+    'Sync plan:',
+    `  Source:          ${plan.source}`,
+    `  Target:          ${plan.target}`,
+    `  Existing links:  ${linked.length}`,
+    `  Links to create: ${actions.length}`,
+    ...actions.map(entry => `    ${entry.source} -> ${entry.target}`),
+    ...conflicts.map(entry => `  Conflict: ${entry.source} (${entry.reason ?? 'unknown conflict'})`),
     '',
   ].join('\n'))
 }

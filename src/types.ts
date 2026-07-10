@@ -22,6 +22,40 @@ export interface MigrationPlan {
 
 export type ConfirmMigration = (plan: MigrationPlan) => Promise<boolean>
 
+export type SyncEntryState = 'missing' | 'linked' | 'conflict'
+
+export interface SyncEntry {
+  name: string
+  source: string
+  target: string
+  state: SyncEntryState
+  reason?: string
+}
+
+export interface SyncPlan {
+  source: string
+  target: string
+  entries: SyncEntry[]
+}
+
+export interface SyncOptions {
+  /** Replace conflicting source entries with the expected symlink. */
+  force: boolean
+  /** Skip the confirmation prompt. */
+  yes: boolean
+  /** Print the links that would be created without writing to disk. */
+  dryRun: boolean
+}
+
+export interface SyncResult {
+  ok: boolean
+  source: string
+  target: string
+  created: string[]
+  alreadyLinked: string[]
+  errors: string[]
+}
+
 export interface WatchOptions {
   /** Replace existing targets when auto-migrating. */
   force: boolean

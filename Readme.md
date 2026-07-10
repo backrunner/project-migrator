@@ -3,7 +3,8 @@
 `project-migrate` moves a project directory to a new location and leaves a
 symlink at the original path, so tools that still reference the old path keep
 working. It can also watch a folder non-recursively and migrate new project
-directories as they appear.
+directories as they appear. The `sync` command repairs missing source-side
+symlinks for projects that are already in a target directory.
 
 When available, it can call
 [`codex-migrator`](https://github.com/backrunner/codex-migrator) so Codex
@@ -93,6 +94,26 @@ If `<target-parent>` does not exist, watch mode asks whether to create it unless
 `--yes` is passed. Without `--yes`, each detected directory is also confirmed
 before it is moved.
 
+### Sync missing symlinks
+
+```bash
+project-migrate sync ~/Projects ~/Work
+```
+
+`sync` scans the direct, non-hidden real directories in `~/Work`. For each one
+that does not have a same-named symlink in `~/Projects`, it creates a symlink
+such as `~/Projects/serlink -> ~/Work/serlink`. It never moves project data,
+deletes target entries, or recurses into nested directories.
+
+Both arguments must be existing, separate real directories. Before changing
+anything, `sync` prints every planned link and asks for confirmation. Pass
+`--yes` to approve it non-interactively, or `--dry-run` to report the links
+without writing to disk.
+
+If a source entry already exists but is not the expected symlink, sync stops to
+avoid overwriting it. Pass `--force` to replace those conflicting source entries
+after reviewing and confirming the plan.
+
 ## Codex integration
 
 When `codex-migrate` is on `PATH`, supports `project --help`, supports `--yes`,
@@ -121,6 +142,8 @@ be migrated. Without `--yes`, `project-migrate` will not spawn an interactive
 - Cross-device moves (for example `/Users` to `/Volumes/...`) automatically
   fall back to copy-then-remove when the platform refuses a direct rename.
 - `--dry-run` never writes to disk.
+- `sync` considers only direct, non-hidden real directories in its target parent
+  and creates only missing same-named source-side symlinks.
 - On Windows, directory junctions are used for the symlink when native symlinks
   aren't available.
 - Watch mode uses `chokidar` with `depth: 0`, so only direct children of the
@@ -141,6 +164,7 @@ Smoke test the build:
 
 ```bash
 ./bin/cli.mjs --help
+./bin/cli.mjs sync --help
 ./bin/cli.mjs watch --help
 ```
 

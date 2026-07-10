@@ -1,4 +1,4 @@
-import type { MigrateOptions, WatchOptions } from './types.js'
+import type { MigrateOptions, SyncOptions, WatchOptions } from './types.js'
 import os from 'node:os'
 import process from 'node:process'
 import chalk from 'chalk'
@@ -6,7 +6,8 @@ import { Command } from 'commander'
 import { version } from '../package.json'
 import { configureLog, error, info, isVerbose, success, verbose } from './log.js'
 import { buildMigrationPlan, isDirectory, migrateProject, pathExists, resolvePath, validateMigrationPlan } from './migrate.js'
-import { confirmCreateDirectory, confirmMigrationPlan } from './prompt.js'
+import { confirmCreateDirectory, confirmMigrationPlan, confirmSyncPlan } from './prompt.js'
+import { buildSyncPlan, getSyncActions, syncProjectDirectories, validateSyncPlan } from './sync.js'
 import { startWatcher } from './watch.js'
 
 const program = new Command()
@@ -29,13 +30,13 @@ program
     const opts = cmd.optsWithGlobals()
     configureLog({ quiet: Boolean(opts.quiet), verbose: Boolean(opts.verbose) })
   })
-  .action(async (src: string | undefined, target: string | undefined, raw: Record<string, unknown>) => {
+  .action(async (src: string | undefined, target: string | undefined, _options: Record<string, unknown>, command: Command) => {
     if (src === undefined || src === '' || target === undefined || target === '') {
       program.help({ error: true })
       return
     }
 
-    const opts = toMigrateOptions(raw)
+    const opts = toMigrateOptions(command.optsWithGlobals())
     const plan = buildMigrationPlan(src, target)
     verbose(`os=${os.platform()} node=${process.version}`)
 
@@ -78,8 +79,8 @@ program
   .option('-y, --yes', 'confirm migrations and apply codex-migrate non-interactively')
   .option('--dry-run', 'report what would happen; write nothing')
   .option('--codex-project-name <name>', 'override the project name passed to codex-migrate')
-  .action(async (watchDir: string, targetParent: string, raw: Record<string, unknown>) => {
-    const opts = toWatchOptions(raw)
+  .action(async (watchDir: string, targetParent: string, _options: Record<string, unknown>, command: Command) => {
+    const opts = toWatchOptions(command.optsWithGlobals())
     const absWatch = resolvePath(watchDir)
     const absTarget = resolvePath(targetParent)
 
@@ -136,6 +137,55 @@ program
     info('press Ctrl+C to stop')
   })
 
+program
+  .command('sync')
+  .description('Create missing source-side symlinks for direct project directories already present in a target directory.')
+  .argument('<src>', 'source parent directory where symlinks are created')
+  .argument('<target>', 'target parent directory containing migrated projects')
+  .option('--force', 'replace conflicting source entries with symlinks')
+  .option('-y, --yes', 'confirm this sync non-interactively')
+  .option('--dry-run', 'print the links that would be created; write nothing')
+  .action(async (src: string, target: string, _options: Record<string, unknown>, command: Command) => {
+    const opts = toSyncOptions(command.optsWithGlobals())
+
+    try {
+      const plan = buildSyncPlan(src, target)
+      validateSyncPlan(plan, opts)
+      const actions = getSyncActions(plan, opts)
+      if (actions.length === 0) {
+        info('sync complete: all target project directories already have matching symlinks')
+        return
+      }
+
+      const confirmed = await confirmSyncPlan(plan, opts)
+      if (!confirmed) {
+        info('sync cancelled')
+        process.exitCode = 1
+        return
+      }
+
+      const result = await syncProjectDirectories(plan, opts)
+      if (result.errors.length > 0) {
+        for (const err of result.errors) {
+          error(err)
+        }
+        process.exitCode = 1
+        return
+      }
+
+      if (opts.dryRun) {
+        info(`dry-run plan: would create ${result.created.length} symlink(s)`)
+      }
+      else {
+        success(`sync complete: created ${result.created.length} symlink(s)`)
+      }
+    }
+    catch (err) {
+      error((err as Error).message)
+      process.exitCode = 1
+    }
+  })
+
 function toMigrateOptions(raw: Record<string, unknown>): MigrateOptions {
   return {
     force: Boolean(raw.force),
@@ -153,6 +203,14 @@ function toWatchOptions(raw: Record<string, unknown>): WatchOptions {
     yes: Boolean(raw.yes),
     dryRun: Boolean(raw.dryRun),
     codexProjectName: typeof raw.codexProjectName === 'string' ? raw.codexProjectName : undefined,
+  }
+}
+
+function toSyncOptions(raw: Record<string, unknown>): SyncOptions {
+  return {
+    force: Boolean(raw.force),
+    yes: Boolean(raw.yes),
+    dryRun: Boolean(raw.dryRun),
   }
 }
 
