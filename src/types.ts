@@ -22,7 +22,7 @@ export interface MigrationPlan {
 
 export type ConfirmMigration = (plan: MigrationPlan) => Promise<boolean>
 
-export type SyncEntryState = 'missing' | 'linked' | 'conflict'
+export type SyncEntryState = 'missing' | 'linked' | 'conflict' | 'adopt'
 
 export interface SyncEntry {
   name: string
@@ -30,6 +30,8 @@ export interface SyncEntry {
   target: string
   state: SyncEntryState
   reason?: string
+  /** True when the target entry is a real directory (not a symlink). */
+  targetIsReal?: boolean
 }
 
 export interface SyncPlan {
@@ -45,6 +47,11 @@ export interface SyncOptions {
   yes: boolean
   /** Print the links that would be created without writing to disk. */
   dryRun: boolean
+  /**
+   * Adopt real (non-symlink) directories found in the target: move them into the
+   * source parent and leave a symlink pointing back from the target.
+   */
+  adopt: boolean
 }
 
 export interface SyncResult {
@@ -53,6 +60,8 @@ export interface SyncResult {
   target: string
   created: string[]
   alreadyLinked: string[]
+  /** Target-side real directories adopted (moved into the source parent). */
+  adopted: string[]
   errors: string[]
 }
 

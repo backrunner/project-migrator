@@ -62,7 +62,11 @@ export async function confirmSyncPlan(plan: SyncPlan, opts: SyncOptions): Promis
   const replacements = opts.force
     ? plan.entries.filter(entry => entry.state === 'conflict').length
     : 0
-  return askYesNo(`Create ${creates + replacements} symlink(s)?`)
+  const adopts = opts.adopt
+    ? plan.entries.filter(entry => entry.state === 'adopt').length
+    : 0
+  const total = creates + replacements + adopts
+  return askYesNo(`${total} action(s) (${creates} create, ${replacements} replace, ${adopts} adopt)?`)
 }
 
 function printMigrationPlan(plan: MigrationPlan, opts: PromptOptions): void {
@@ -89,6 +93,7 @@ function printSyncPlan(plan: SyncPlan, opts: SyncOptions): void {
   const missing = plan.entries.filter(entry => entry.state === 'missing')
   const linked = plan.entries.filter(entry => entry.state === 'linked')
   const conflicts = plan.entries.filter(entry => entry.state === 'conflict')
+  const adopts = opts.adopt ? plan.entries.filter(entry => entry.state === 'adopt') : []
   const actions = opts.force ? [...missing, ...conflicts] : missing
 
   process.stdout.write([
@@ -98,6 +103,9 @@ function printSyncPlan(plan: SyncPlan, opts: SyncOptions): void {
     `  Existing links:  ${linked.length}`,
     `  Links to create: ${actions.length}`,
     ...actions.map(entry => `    ${entry.source} -> ${entry.target}`),
+    ...(adopts.length > 0
+      ? [`  Adopt (move to source, leave symlink): ${adopts.length}`, ...adopts.map(entry => `    ${entry.target} -> ${entry.source}`)]
+      : []),
     ...conflicts.map(entry => `  Conflict: ${entry.source} (${entry.reason ?? 'unknown conflict'})`),
     '',
   ].join('\n'))

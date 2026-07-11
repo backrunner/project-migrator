@@ -7,7 +7,7 @@ import { version } from '../package.json'
 import { configureLog, error, info, isVerbose, success, verbose } from './log.js'
 import { buildMigrationPlan, isDirectory, migrateProject, pathExists, resolvePath, validateMigrationPlan } from './migrate.js'
 import { confirmCreateDirectory, confirmMigrationPlan, confirmSyncPlan } from './prompt.js'
-import { buildSyncPlan, getSyncActions, syncProjectDirectories, validateSyncPlan } from './sync.js'
+import { buildSyncPlan, getAdoptActions, getSyncActions, syncProjectDirectories, validateSyncPlan } from './sync.js'
 import { startWatcher } from './watch.js'
 
 const program = new Command()
@@ -145,14 +145,16 @@ program
   .option('--force', 'replace conflicting source entries with symlinks')
   .option('-y, --yes', 'confirm this sync non-interactively')
   .option('--dry-run', 'print the links that would be created; write nothing')
+  .option('--adopt', 'adopt real directories in target: move them into source and leave a symlink')
   .action(async (src: string, target: string, _options: Record<string, unknown>, command: Command) => {
     const opts = toSyncOptions(command.optsWithGlobals())
 
     try {
-      const plan = buildSyncPlan(src, target)
+      const plan = buildSyncPlan(src, target, opts)
       validateSyncPlan(plan, opts)
       const actions = getSyncActions(plan, opts)
-      if (actions.length === 0) {
+      const adoptActions = opts.adopt ? getAdoptActions(plan) : []
+      if (actions.length === 0 && adoptActions.length === 0) {
         info('sync complete: all target project directories already have matching symlinks')
         return
       }
@@ -174,10 +176,14 @@ program
       }
 
       if (opts.dryRun) {
-        info(`dry-run plan: would create ${result.created.length} symlink(s)`)
+        info(`dry-run plan: would create ${result.created.length} symlink(s), adopt ${result.adopted.length} director(y/ies)`)
       }
       else {
-        success(`sync complete: created ${result.created.length} symlink(s)`)
+        const parts = [`created ${result.created.length} symlink(s)`]
+        if (result.adopted.length > 0) {
+          parts.push(`adopted ${result.adopted.length} director(y/ies)`)
+        }
+        success(`sync complete: ${parts.join(', ')}`)
       }
     }
     catch (err) {
@@ -211,6 +217,7 @@ function toSyncOptions(raw: Record<string, unknown>): SyncOptions {
     force: Boolean(raw.force),
     yes: Boolean(raw.yes),
     dryRun: Boolean(raw.dryRun),
+    adopt: Boolean(raw.adopt),
   }
 }
 
