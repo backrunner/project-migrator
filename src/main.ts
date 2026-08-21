@@ -1,12 +1,11 @@
 import type { MigrateOptions, SyncOptions, WatchOptions } from './types.js'
 import os from 'node:os'
 import process from 'node:process'
-import chalk from 'chalk'
 import { Command } from 'commander'
 import { version } from '../package.json'
 import { configureLog, error, info, isVerbose, success, verbose } from './log.js'
 import { buildMigrationPlan, isDirectory, migrateProject, pathExists, resolvePath, validateMigrationPlan } from './migrate.js'
-import { confirmCreateDirectory, confirmMigrationPlan, confirmSyncPlan } from './prompt.js'
+import { confirmAdoptDirectories, confirmCreateDirectory, confirmMigrationPlan, confirmSyncPlan, printSyncPlan } from './prompt.js'
 import { buildSyncPlan, getAdoptActions, getSyncActions, syncProjectDirectories, validateSyncPlan } from './sync.js'
 import { startWatcher } from './watch.js'
 
@@ -139,10 +138,10 @@ program
 
 program
   .command('sync')
-  .description('Create missing source-side symlinks for direct project directories already present in a target directory.')
-  .argument('<src>', 'source parent directory where symlinks are created')
-  .argument('<target>', 'target parent directory containing migrated projects')
-  .option('--force', 'replace conflicting source entries with symlinks')
+  .description('Mirror direct project directories from a source into a target directory as symlinks.')
+  .argument('<src>', 'source parent directory containing real project directories')
+  .argument('<target>', 'target parent directory where symlinks are created')
+  .option('--force', 'replace conflicting target entries with symlinks')
   .option('-y, --yes', 'confirm this sync non-interactively')
   .option('--dry-run', 'print the links that would be created; write nothing')
   .option('--adopt', 'adopt real directories in target: move them into source and leave a symlink')
@@ -150,12 +149,42 @@ program
     const opts = toSyncOptions(command.optsWithGlobals())
 
     try {
-      const plan = buildSyncPlan(src, target, opts)
-      validateSyncPlan(plan, opts)
+      let plan = buildSyncPlan(src, target, opts)
+      let skippedAdoptCount = 0
+
+      if (!opts.adopt) {
+        const adoptPlan = buildSyncPlan(src, target, { ...opts, adopt: true })
+        const adoptCandidates = getAdoptActions(adoptPlan)
+
+        if (adoptCandidates.length > 0 && !opts.yes && !opts.dryRun) {
+          opts.adopt = await confirmAdoptDirectories(adoptCandidates)
+          if (opts.adopt) {
+            plan = adoptPlan
+          }
+        }
+
+        if (!opts.adopt) {
+          skippedAdoptCount = adoptCandidates.length
+        }
+      }
+
+      try {
+        validateSyncPlan(plan, opts)
+      }
+      catch (err) {
+        if (!opts.yes) {
+          printSyncPlan(plan, opts)
+        }
+        throw err
+      }
       const actions = getSyncActions(plan, opts)
       const adoptActions = opts.adopt ? getAdoptActions(plan) : []
       if (actions.length === 0 && adoptActions.length === 0) {
-        info('sync complete: all target project directories already have matching symlinks')
+        if (opts.dryRun) {
+          printSyncPlan(plan, opts)
+        }
+        info('sync complete: all source project directories already have matching links in target')
+        reportSkippedAdopts(skippedAdoptCount)
         return
       }
 
@@ -176,15 +205,22 @@ program
       }
 
       if (opts.dryRun) {
-        info(`dry-run plan: would create ${result.created.length} symlink(s), adopt ${result.adopted.length} director(y/ies)`)
+        info(`dry-run plan: would create ${result.created.length} symlink(s), repair ${result.repaired.length} symlink(s), adopt ${result.adopted.length} director(y/ies)`)
       }
       else {
-        const parts = [`created ${result.created.length} symlink(s)`]
+        const parts: string[] = []
+        if (result.created.length > 0) {
+          parts.push(`created ${result.created.length} symlink(s)`)
+        }
+        if (result.repaired.length > 0) {
+          parts.push(`repaired ${result.repaired.length} symlink(s)`)
+        }
         if (result.adopted.length > 0) {
           parts.push(`adopted ${result.adopted.length} director(y/ies)`)
         }
         success(`sync complete: ${parts.join(', ')}`)
       }
+      reportSkippedAdopts(skippedAdoptCount)
     }
     catch (err) {
       error((err as Error).message)
@@ -221,11 +257,17 @@ function toSyncOptions(raw: Record<string, unknown>): SyncOptions {
   }
 }
 
+function reportSkippedAdopts(count: number): void {
+  if (count === 0) {
+    return
+  }
+
+  info(`left ${count} real target director${count === 1 ? 'y' : 'ies'} unchanged; use --adopt to move ${count === 1 ? 'it' : 'them'} into source`)
+}
+
 void isVerbose
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   error(err instanceof Error ? err.message : String(err))
   process.exitCode = 1
 })
-
-void chalk

@@ -1,19 +1,23 @@
 import type { SyncEntry, SyncOptions, SyncPlan, SyncResult } from './types.js'
 import fs from 'node:fs'
 import path from 'node:path'
+import process from 'node:process'
 import { info, success, verbose } from './log.js'
 import { createSymlink, isDirectory, isSymlink, moveDirectory, pathExists, resolvePath } from './migrate.js'
 
 /**
- * Build a plan to create source-side links for direct project directories in
- * the target parent. Existing correct links are retained; conflicting source
- * entries are reported and need --force before they can be replaced.
+ * Build a plan that mirrors direct, non-hidden project directories from the
+ * source parent into the target parent as symlinks. Existing correct links are
+ * retained; conflicting target entries require --force before replacement.
  *
- * In adopt mode, real (non-symlink) directories found in the target are flagged
- * for adoption: they are moved into the source parent and a symlink is left at
- * the original target path.
+ * In adopt mode, real directories found in the target are moved into the
+ * source parent and replaced with links back to their new source locations.
  */
-export function buildSyncPlan(source: string, target: string, opts: Pick<SyncOptions, 'adopt' | 'force'> = { adopt: false, force: false }): SyncPlan {
+export function buildSyncPlan(
+  source: string,
+  target: string,
+  opts: Pick<SyncOptions, 'adopt' | 'force'> = { adopt: false, force: false },
+): SyncPlan {
   const plan: SyncPlan = {
     source: resolvePath(source),
     target: resolvePath(target),
@@ -21,58 +25,64 @@ export function buildSyncPlan(source: string, target: string, opts: Pick<SyncOpt
   }
 
   validateSyncDirectories(plan)
-  plan.entries = fs.readdirSync(plan.target, { withFileTypes: true })
-    .filter(entry => !entry.name.startsWith('.')
-      && (opts.adopt
-        ? (entry.isSymbolicLink() || entry.isDirectory()) && !entry.isFile()
-        : entry.isDirectory() && !entry.isSymbolicLink()))
-    .sort((left, right) => left.name.localeCompare(right.name))
-    .map((entry) => {
-      const targetPath = path.join(plan.target, entry.name)
-      // readdirSync withFileTypes: true reports symlink entries, but a symlink
-      // whose target is a directory reports isDirectory() via stat, not lstat.
-      // entry.isDirectory() here is lstat-based, so a symlink reports false.
-      const targetIsSymlink = entry.isSymbolicLink()
-      return describeSyncEntry(plan.source, targetPath, entry.name, targetIsSymlink, opts)
-    })
 
+  const entries = fs.readdirSync(plan.source, { withFileTypes: true })
+    .filter(entry => !entry.name.startsWith('.') && entry.isDirectory() && !entry.isSymbolicLink())
+    .map(entry => describeSourceEntry(plan, entry.name, opts))
+
+  if (opts.adopt) {
+    const sourceNames = new Set(entries.map(entry => entry.name))
+    const adoptEntries = fs.readdirSync(plan.target, { withFileTypes: true })
+      .filter(entry => !entry.name.startsWith('.')
+        && entry.isDirectory()
+        && !entry.isSymbolicLink()
+        && !sourceNames.has(entry.name))
+      .map(entry => describeAdoptEntry(plan, entry.name))
+    entries.push(...adoptEntries)
+  }
+
+  plan.entries = entries.sort((left, right) => left.name.localeCompare(right.name))
   return plan
 }
 
-/** Validate the parent directories and reject ambiguous nested layouts. */
-export function validateSyncPlan(plan: SyncPlan, opts: Pick<SyncOptions, 'force'>): void {
+/** Validate the parent directories and reject conflicts that need --force. */
+export function validateSyncPlan(plan: SyncPlan, opts: Pick<SyncOptions, 'adopt' | 'force'>): void {
   validateSyncDirectories(plan)
 
-  // 'adopt' entries that would replace an existing real source directory are
-  // only safe with --force; surface them as conflicts otherwise.
-  const conflicts = plan.entries.filter(entry => entry.state === 'conflict'
-    || (entry.state === 'adopt' && entryHasRealSourceConflict(entry)))
-  if (conflicts.length > 0 && !opts.force) {
-    const paths = conflicts.map(entry => entry.source).join(', ')
-    throw new Error(`source entries conflict with required symlinks: ${paths} (use --force to replace)`)
+  const targetConflicts = plan.entries.filter(entry => entry.state === 'conflict')
+  if (targetConflicts.length > 0 && !opts.force) {
+    const paths = targetConflicts.map(entry => entry.target).join(', ')
+    throw new Error(`target entries conflict with required symlinks: ${paths} (use --force to replace)`)
+  }
+
+  const sourceConflicts = opts.adopt
+    ? plan.entries.filter(entry => entry.state === 'adopt' && pathExists(entry.source))
+    : []
+  if (sourceConflicts.length > 0 && !opts.force) {
+    const paths = sourceConflicts.map(entry => entry.source).join(', ')
+    throw new Error(`source entries conflict with directories selected for adoption: ${paths} (use --force to replace)`)
   }
 }
 
-function entryHasRealSourceConflict(entry: SyncEntry): boolean {
-  return pathExists(entry.source) && !isSymlink(entry.source)
-}
-
-/** Return the source-side links that sync would create or replace. */
+/** Return target-side links that sync would create, repair, or replace. */
 export function getSyncActions(plan: SyncPlan, opts: Pick<SyncOptions, 'force'>): SyncEntry[] {
-  return plan.entries.filter(entry => entry.state === 'missing' || (opts.force && entry.state === 'conflict'))
+  return plan.entries.filter(entry => entry.state === 'missing'
+    || entry.state === 'repair'
+    || (opts.force && entry.state === 'conflict'))
 }
 
-/** Return target-side real directories that sync would adopt into the source parent. */
+/** Return real target directories that sync would adopt into the source parent. */
 export function getAdoptActions(plan: SyncPlan): SyncEntry[] {
   return plan.entries.filter(entry => entry.state === 'adopt')
 }
 
-/** Create every missing source-side symlink and adopt real target directories in a validated sync plan. */
+/** Create missing target-side links and adopt selected real target directories. */
 export async function syncProjectDirectories(plan: SyncPlan, opts: SyncOptions): Promise<SyncResult> {
   const created: string[] = []
+  const repaired: string[] = []
   const alreadyLinked = plan.entries
     .filter(entry => entry.state === 'linked')
-    .map(entry => entry.source)
+    .map(entry => entry.target)
   const adopted: string[] = []
   const errors: string[] = []
 
@@ -81,17 +91,17 @@ export async function syncProjectDirectories(plan: SyncPlan, opts: SyncOptions):
   }
   catch (err) {
     errors.push((err as Error).message)
-    return { ok: false, source: plan.source, target: plan.target, created, alreadyLinked, adopted, errors }
+    return { ok: false, source: plan.source, target: plan.target, created, repaired, alreadyLinked, adopted, errors }
   }
 
   const linkActions = getSyncActions(plan, opts)
   const adoptActions = opts.adopt ? getAdoptActions(plan) : []
-  verbose(`sync ${plan.source} <- ${plan.target} (${linkActions.length} symlinks, ${adoptActions.length} adopts, dryRun=${opts.dryRun})`)
+  verbose(`sync ${plan.source} -> ${plan.target} (${linkActions.length} symlinks, ${adoptActions.length} adopts, dryRun=${opts.dryRun})`)
 
   for (const entry of adoptActions) {
     try {
       await adoptProjectDirectory(entry, opts)
-      adopted.push(entry.target)
+      adopted.push(entry.source)
     }
     catch (err) {
       errors.push(`failed to adopt ${entry.target}: ${(err as Error).message}`)
@@ -100,16 +110,28 @@ export async function syncProjectDirectories(plan: SyncPlan, opts: SyncOptions):
 
   for (const entry of linkActions) {
     try {
-      await createSymlink(entry.source, entry.target, {
-        force: opts.force,
-        noCodex: true,
-        yes: opts.yes,
-        dryRun: opts.dryRun,
-      })
-      created.push(entry.source)
+      if (entry.state === 'repair') {
+        await repairCaseMismatchSymlink(entry, opts)
+      }
+      else {
+        await createSymlink(entry.target, entry.source, {
+          force: opts.force,
+          noCodex: true,
+          yes: opts.yes,
+          dryRun: opts.dryRun,
+        })
+      }
+
+      if (entry.state === 'repair') {
+        repaired.push(entry.target)
+      }
+      else {
+        created.push(entry.target)
+      }
     }
     catch (err) {
-      errors.push(`failed to create symlink ${entry.source}: ${(err as Error).message}`)
+      const action = entry.state === 'repair' ? 'repair' : 'create'
+      errors.push(`failed to ${action} symlink ${entry.target}: ${(err as Error).message}`)
     }
   }
 
@@ -118,33 +140,47 @@ export async function syncProjectDirectories(plan: SyncPlan, opts: SyncOptions):
     source: plan.source,
     target: plan.target,
     created,
+    repaired,
     alreadyLinked,
     adopted,
     errors,
   }
 }
 
-/**
- * Adopt a real target directory: move it into the source parent and leave a
- * symlink at the original target path pointing to the new source location.
- * The source parent must not already contain a conflicting real entry unless
- * --force is set.
- */
+async function repairCaseMismatchSymlink(entry: SyncEntry, opts: SyncOptions): Promise<void> {
+  if (opts.dryRun) {
+    info(`dry-run: would repair symlink ${entry.target} -> ${entry.source}`)
+    return
+  }
+
+  const currentDestination = isSymlink(entry.target)
+    ? resolveSymlinkDestination(entry.target)
+    : undefined
+  if (currentDestination === undefined || !isCaseOnlyPathMismatch(currentDestination, entry.source)) {
+    throw new Error('target changed after planning; refusing automatic replacement')
+  }
+
+  await createSymlink(entry.target, entry.source, {
+    force: true,
+    noCodex: true,
+    yes: opts.yes,
+    dryRun: false,
+  })
+}
+
+/** Move a real target directory into source, then leave a link at target. */
 async function adoptProjectDirectory(entry: SyncEntry, opts: SyncOptions): Promise<void> {
   if (opts.dryRun) {
     info(`dry-run: would adopt ${entry.target} -> ${entry.source} (symlink back: ${entry.target} -> ${entry.source})`)
     return
   }
 
-  const sourceExists = pathExists(entry.source)
-  const sourceIsLink = isSymlink(entry.source)
-
-  if (sourceExists && !sourceIsLink && !opts.force) {
-    throw new Error(`source location already exists as a real directory: ${entry.source} (use --force to replace)`)
+  if (pathExists(entry.source) && !opts.force) {
+    throw new Error(`source location already exists: ${entry.source} (use --force to replace)`)
   }
 
   await moveDirectory(entry.target, entry.source, {
-    force: opts.force || sourceIsLink,
+    force: opts.force,
     noCodex: true,
     yes: opts.yes,
     dryRun: opts.dryRun,
@@ -191,62 +227,134 @@ function isDescendant(relativePath: string): boolean {
     && !path.isAbsolute(relativePath)
 }
 
-function describeSyncEntry(
-  sourceParent: string,
-  target: string,
+function describeSourceEntry(
+  plan: SyncPlan,
   name: string,
-  targetIsSymlink: boolean,
-  opts: Pick<SyncOptions, 'adopt' | 'force'>,
+  opts: Pick<SyncOptions, 'adopt'>,
 ): SyncEntry {
-  const source = path.join(sourceParent, name)
-  const targetIsReal = !targetIsSymlink && pathExists(target) && isDirectory(target)
-  const sourceExists = pathExists(source)
-  const sourceIsLink = isSymlink(source)
+  const source = path.join(plan.source, name)
+  const target = path.join(plan.target, name)
+  const targetExists = pathExists(target)
+  const targetIsSymlink = isSymlink(target)
+  const targetIsReal = targetExists && !targetIsSymlink && isDirectory(target)
 
-  // Adopt mode: a real directory under target that should be moved into the
-  // source parent, with a symlink left behind at the target path.
-  if (opts.adopt && targetIsReal) {
-    if (!sourceExists) {
-      return { name, source, target, state: 'adopt', targetIsReal: true }
-    }
-    // Source already holds a real directory. Replacing it needs --force; we
-    // return 'adopt' and let validateSyncPlan block the run without --force.
-    if (!sourceIsLink) {
-      return { name, source, target, state: 'adopt', targetIsReal: true }
-    }
-    // Source is a symlink; fall through to the linked/conflict checks.
+  if (!targetExists) {
+    return { name, source, target, state: 'missing', targetIsReal: false }
   }
 
-  // Already-adopted: target is a symlink pointing at the real source directory.
-  // Both directions resolve to the same realpath, so no action is needed.
-  if (targetIsSymlink && sourceExists && !sourceIsLink) {
+  if (targetIsSymlink) {
+    const symlinkDestination = resolveSymlinkDestination(target)
+    if (symlinkDestination !== undefined && isCaseOnlyPathMismatch(symlinkDestination, source)) {
+      return {
+        name,
+        source,
+        target,
+        state: isCaseSensitivePath(source) ? 'repair' : 'linked',
+        reason: 'target symlink uses different path casing',
+        targetIsReal: false,
+      }
+    }
+
     try {
       if (fs.realpathSync(target) === fs.realpathSync(source)) {
         return { name, source, target, state: 'linked', targetIsReal: false }
       }
     }
     catch {
-      // Broken target symlink; fall through to conflict.
+      // Broken or inaccessible links are conflicts and require --force.
+    }
+
+    return {
+      name,
+      source,
+      target,
+      state: 'conflict',
+      reason: 'target symlink points to a different location or is broken',
+      targetIsReal: false,
     }
   }
 
-  if (!sourceExists) {
-    // Target is a real directory (no symlink yet) and source is missing — this
-    // is the plain "create a symlink" case in non-adopt mode.
-    return { name, source, target, state: 'missing', targetIsReal }
-  }
-  if (!sourceIsLink) {
-    return { name, source, target, state: 'conflict', reason: 'source entry exists and is not a symlink', targetIsReal }
+  if (opts.adopt && targetIsReal) {
+    return {
+      name,
+      source,
+      target,
+      state: 'adopt',
+      reason: 'source entry already exists and would be replaced',
+      targetIsReal: true,
+    }
   }
 
+  return {
+    name,
+    source,
+    target,
+    state: 'conflict',
+    reason: targetIsReal ? 'target entry is a real directory' : 'target entry is not a symlink',
+    targetIsReal,
+  }
+}
+
+/** Detect case sensitivity without writing by probing an alternate-cased path. */
+export function isCaseSensitivePath(existingPath: string): boolean {
+  if (process.platform === 'win32') {
+    return false
+  }
+
+  let current = path.resolve(existingPath)
+  while (current !== path.dirname(current)) {
+    const name = path.basename(current)
+    const alternateName = swapFirstAsciiLetterCase(name)
+    if (alternateName !== name) {
+      try {
+        const original = fs.statSync(current)
+        const alternate = fs.statSync(path.join(path.dirname(current), alternateName))
+        return original.dev !== alternate.dev || original.ino !== alternate.ino
+      }
+      catch {
+        return true
+      }
+    }
+    current = path.dirname(current)
+  }
+
+  return true
+}
+
+function resolveSymlinkDestination(linkPath: string): string | undefined {
   try {
-    if (fs.realpathSync(source) === fs.realpathSync(target)) {
-      return { name, source, target, state: 'linked', targetIsReal }
-    }
+    const destination = fs.readlinkSync(linkPath)
+    return path.resolve(path.dirname(linkPath), destination)
   }
   catch {
-    // A broken link or inaccessible target must not be replaced without --force.
+    return undefined
+  }
+}
+
+function isCaseOnlyPathMismatch(actual: string, expected: string): boolean {
+  return actual !== expected && actual.toLowerCase() === expected.toLowerCase()
+}
+
+function swapFirstAsciiLetterCase(value: string): string {
+  const index = value.search(/[a-z]/i)
+  if (index === -1) {
+    return value
   }
 
-  return { name, source, target, state: 'conflict', reason: 'source symlink points to a different location or is broken', targetIsReal }
+  const character = value[index]
+  const swapped = character === character.toLowerCase() ? character.toUpperCase() : character.toLowerCase()
+  return `${value.slice(0, index)}${swapped}${value.slice(index + 1)}`
+}
+
+function describeAdoptEntry(plan: SyncPlan, name: string): SyncEntry {
+  const source = path.join(plan.source, name)
+  const target = path.join(plan.target, name)
+  return {
+    name,
+    source,
+    target,
+    state: 'adopt',
+    reason: pathExists(source) ? 'source entry already exists and would be replaced' : undefined,
+    targetIsReal: true,
+  }
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile as execFileCallback } from 'node:child_process'
-import { lstat, mkdir, mkdtemp, readlink, rm, symlink } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readlink, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 // The repository intentionally uses Node's built-in test runner.
@@ -14,6 +14,7 @@ const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 const cli = path.join(projectRoot, 'bin', 'cli.mjs')
 const rollup = path.join(projectRoot, 'node_modules', 'rollup', 'dist', 'bin', 'rollup')
 const temporaryDirectories = []
+const linkType = process.platform === 'win32' ? 'junction' : 'dir'
 
 before(async () => {
   await execFile(process.execPath, [rollup, '-c', 'rollup.config.ts', '--configPlugin', 'typescript'], { cwd: projectRoot })
@@ -23,29 +24,38 @@ after(async () => {
   await Promise.all(temporaryDirectories.map(dir => rm(dir, { recursive: true, force: true })))
 })
 
-test('sync dry-runs, creates missing links, and is idempotent', async () => {
+test('sync detects existing target links, previews the correct direction, and is idempotent', async () => {
   const { source, target } = await createParents()
-  await mkdir(path.join(target, 'alpha'))
-  await mkdir(path.join(target, 'beta'))
-  await mkdir(path.join(target, '.hidden'))
+  await mkdir(path.join(source, 'alpha'))
+  await mkdir(path.join(source, 'beta'))
+  await mkdir(path.join(source, '.hidden'))
+  await symlink(path.join(source, 'alpha'), path.join(target, 'alpha'), linkType)
+  await mkdir(path.join(target, 'target-only'))
 
   const dryRun = await runCli('sync', source, target, '--dry-run')
-  assert.match(dryRun.stdout, /would create 2 symlink\(s\)/)
-  assert.equal(await exists(path.join(source, 'alpha')), false)
+  assert.match(dryRun.stdout, /Sync plan/)
+  assert.match(dryRun.stdout, new RegExp(`Project source\\s+${escapeRegExp(source)}`))
+  assert.match(dryRun.stdout, new RegExp(`Link directory\\s+${escapeRegExp(target)}`))
+  assert.match(dryRun.stdout, /Existing links\s+1/)
+  assert.match(dryRun.stdout, /Create\s+1/)
+  assert.match(dryRun.stdout, new RegExp(`${escapeRegExp(path.join(target, 'beta'))} -> ${escapeRegExp(path.join(source, 'beta'))}`))
+  assert.equal(await exists(path.join(target, 'beta')), false)
 
   await runCli('sync', source, target, '--yes')
-  assert.equal((await lstat(path.join(source, 'alpha'))).isSymbolicLink(), true)
-  assert.equal(await readlink(path.join(source, 'alpha')), path.join(target, 'alpha'))
-  assert.equal((await lstat(path.join(source, 'beta'))).isSymbolicLink(), true)
-  assert.equal(await exists(path.join(source, '.hidden')), false)
+  assert.equal((await lstat(path.join(target, 'alpha'))).isSymbolicLink(), true)
+  assert.equal((await lstat(path.join(target, 'beta'))).isSymbolicLink(), true)
+  assert.equal(await readlink(path.join(target, 'beta')), path.join(source, 'beta'))
+  assert.equal((await lstat(path.join(target, 'target-only'))).isDirectory(), true)
+  assert.equal(await exists(path.join(target, '.hidden')), false)
 
   const repeated = await runCli('sync', source, target, '--yes')
-  assert.match(repeated.stdout, /already have matching symlinks/)
+  assert.match(repeated.stdout, /all source project directories already have matching links in target/)
+  assert.match(repeated.stdout, /left 1 real target directory unchanged; use --adopt/)
 })
 
-test('sync requires confirmation and protects conflicting source entries', async () => {
+test('sync requires confirmation and protects conflicting target entries', async () => {
   const { source, target } = await createParents()
-  await mkdir(path.join(target, 'beta'))
+  await mkdir(path.join(source, 'beta'))
 
   await assert.rejects(
     runCli('sync', source, target),
@@ -54,22 +64,91 @@ test('sync requires confirmation and protects conflicting source entries', async
       return true
     },
   )
-  assert.equal(await exists(path.join(source, 'beta')), false)
+  assert.equal(await exists(path.join(target, 'beta')), false)
 
-  await mkdir(path.join(source, 'beta'))
+  await mkdir(path.join(target, 'beta'))
+
+  await assert.rejects(
+    runCli('sync', source, target, '--dry-run'),
+    (error) => {
+      const output = commandOutput(error)
+      assert.match(output, /Sync plan/)
+      assert.match(output, /CONFLICT beta/)
+      assert.match(output, /target entries conflict/)
+      return true
+    },
+  )
 
   await assert.rejects(
     runCli('sync', source, target, '--yes'),
     (error) => {
-      assert.match(commandOutput(error), /source entries conflict/)
+      assert.match(commandOutput(error), /target entries conflict/)
       return true
     },
   )
-  assert.equal((await lstat(path.join(source, 'beta'))).isDirectory(), true)
+  assert.equal((await lstat(path.join(target, 'beta'))).isDirectory(), true)
 
   await runCli('sync', source, target, '--force', '--yes')
-  assert.equal((await lstat(path.join(source, 'beta'))).isSymbolicLink(), true)
-  assert.equal(await readlink(path.join(source, 'beta')), path.join(target, 'beta'))
+  assert.equal((await lstat(path.join(target, 'beta'))).isSymbolicLink(), true)
+  assert.equal(await readlink(path.join(target, 'beta')), path.join(source, 'beta'))
+})
+
+test('sync repairs case-only symlink mismatches only on case-sensitive filesystems', async () => {
+  const root = await createTemporaryDirectory()
+  const source = path.join(root, 'Projects')
+  const alternateSource = path.join(root, 'projects')
+  const target = path.join(root, 'target')
+  await mkdir(path.join(source, 'alpha'), { recursive: true })
+  await mkdir(target)
+
+  const caseInsensitive = await exists(alternateSource)
+  if (!caseInsensitive) {
+    await mkdir(path.join(alternateSource, 'alpha'), { recursive: true })
+  }
+
+  const alternateProject = path.join(alternateSource, 'alpha')
+  const targetLink = path.join(target, 'alpha')
+  await symlink(alternateProject, targetLink, linkType)
+
+  const dryRun = await runCli('sync', source, target, '--dry-run')
+  if (caseInsensitive) {
+    assert.match(dryRun.stdout, /Existing links\s+1/)
+    assert.match(dryRun.stdout, /Repair\s+0/)
+    assert.doesNotMatch(dryRun.stdout, /REPAIR alpha/)
+
+    const result = await runCli('sync', source, target, '--yes')
+    assert.match(result.stdout, /all source project directories already have matching links in target/)
+    assert.equal(await readlink(targetLink), alternateProject)
+  }
+  else {
+    assert.match(dryRun.stdout, /Existing links\s+0/)
+    assert.match(dryRun.stdout, /Repair\s+1/)
+    assert.match(dryRun.stdout, /REPAIR alpha/)
+    assert.doesNotMatch(dryRun.stdout, /CONFLICT alpha/)
+
+    const result = await runCli('sync', source, target, '--yes')
+    assert.match(result.stdout, /repaired 1 symlink/)
+    assert.equal(await readlink(targetLink), path.join(source, 'alpha'))
+  }
+})
+
+test('sync still requires --force for a symlink pointing to an unrelated location', async () => {
+  const { source, target } = await createParents()
+  const elsewhere = path.join(path.dirname(source), 'elsewhere')
+  await mkdir(path.join(source, 'alpha'))
+  await mkdir(elsewhere)
+  await symlink(elsewhere, path.join(target, 'alpha'), linkType)
+
+  await assert.rejects(
+    runCli('sync', source, target, '--yes'),
+    (error) => {
+      assert.match(commandOutput(error), /target entries conflict/)
+      return true
+    },
+  )
+
+  await runCli('sync', source, target, '--force', '--yes')
+  assert.equal(await readlink(path.join(target, 'alpha')), path.join(source, 'alpha'))
 })
 
 test('sync rejects source and target aliases for the same real directory', async () => {
@@ -79,7 +158,7 @@ test('sync rejects source and target aliases for the same real directory', async
   const aliasParent = path.join(root, 'alias')
   const target = path.join(aliasParent, 'projects')
   await mkdir(path.join(source, 'alpha'), { recursive: true })
-  await symlink(realParent, aliasParent, process.platform === 'win32' ? 'junction' : 'dir')
+  await symlink(realParent, aliasParent, linkType)
 
   await assert.rejects(
     runCli('sync', source, target, '--force', '--yes'),
@@ -91,116 +170,109 @@ test('sync rejects source and target aliases for the same real directory', async
   assert.equal((await lstat(path.join(source, 'alpha'))).isDirectory(), true)
 })
 
-test('sync --adopt dry-runs, moves real target directories into source, and leaves symlinks', async () => {
+test('sync --adopt creates missing links, moves real target directories into source, and is idempotent', async () => {
   const { source, target } = await createParents()
-  // Real directory in target that should be adopted.
+  await mkdir(path.join(source, 'alpha'))
   await mkdir(path.join(target, 'gamma'))
   await mkdir(path.join(target, 'gamma', 'inner'))
-  // Plain missing-link case: real dir in target, no source entry. In adopt
-  // mode this is also classified as 'adopt' (move to source + symlink back),
-  // NOT a plain 'missing' symlink creation.
   await mkdir(path.join(target, 'delta'))
 
   const dryRun = await runCli('sync', source, target, '--adopt', '--dry-run')
-  assert.match(dryRun.stdout, /adopt 2 director/)
-  // Nothing moved yet.
+  assert.match(dryRun.stdout, /Create\s+1/)
+  assert.match(dryRun.stdout, /Adopt\s+2/)
   assert.equal((await lstat(path.join(target, 'gamma'))).isDirectory(), true)
   assert.equal(await exists(path.join(source, 'gamma')), false)
 
   await runCli('sync', source, target, '--adopt', '--yes')
-  // gamma moved into source; target/gamma is now a symlink to source/gamma.
+  assert.equal((await lstat(path.join(target, 'alpha'))).isSymbolicLink(), true)
+  assert.equal(await readlink(path.join(target, 'alpha')), path.join(source, 'alpha'))
   assert.equal((await lstat(path.join(source, 'gamma'))).isDirectory(), true)
   assert.equal((await lstat(path.join(source, 'gamma', 'inner'))).isDirectory(), true)
   assert.equal((await lstat(path.join(target, 'gamma'))).isSymbolicLink(), true)
   assert.equal(await readlink(path.join(target, 'gamma')), path.join(source, 'gamma'))
-  // delta likewise.
   assert.equal((await lstat(path.join(source, 'delta'))).isDirectory(), true)
   assert.equal((await lstat(path.join(target, 'delta'))).isSymbolicLink(), true)
   assert.equal(await readlink(path.join(target, 'delta')), path.join(source, 'delta'))
 
-  // Idempotent: re-running adopt reports everything already linked.
   const repeated = await runCli('sync', source, target, '--adopt', '--yes')
-  assert.match(repeated.stdout, /already have matching symlinks/)
+  assert.match(repeated.stdout, /all source project directories already have matching links in target/)
 })
 
-test('sync --adopt protects a real source entry that shadows the target directory', async () => {
+test('sync --adopt protects a real source entry that shadows a target directory', async () => {
   const { source, target } = await createParents()
-  await mkdir(path.join(target, 'epsilon'))
-  // Source already has a real directory of the same name — must not clobber
-  // without --force.
   await mkdir(path.join(source, 'epsilon'))
+  await writeFile(path.join(source, 'epsilon', 'old'), 'old')
+  await mkdir(path.join(target, 'epsilon'))
+  await writeFile(path.join(target, 'epsilon', 'new'), 'new')
 
   await assert.rejects(
     runCli('sync', source, target, '--adopt', '--yes'),
     (error) => {
-      assert.match(commandOutput(error), /source entries conflict/)
+      assert.match(commandOutput(error), /source entries conflict with directories selected for adoption/)
       return true
     },
   )
-  // Source entry untouched.
-  assert.equal((await lstat(path.join(source, 'epsilon'))).isDirectory(), true)
+  assert.equal(await exists(path.join(source, 'epsilon', 'old')), true)
   assert.equal((await lstat(path.join(target, 'epsilon'))).isDirectory(), true)
 
-  // With --force the source real directory is replaced: target moved over it,
-  // then symlink left at target pointing to source.
   await runCli('sync', source, target, '--adopt', '--force', '--yes')
   assert.equal((await lstat(path.join(source, 'epsilon'))).isDirectory(), true)
+  assert.equal(await exists(path.join(source, 'epsilon', 'old')), false)
+  assert.equal(await exists(path.join(source, 'epsilon', 'new')), true)
   assert.equal((await lstat(path.join(target, 'epsilon'))).isSymbolicLink(), true)
   assert.equal(await readlink(path.join(target, 'epsilon')), path.join(source, 'epsilon'))
 })
 
-test('sync --adopt skips target symlinks already pointing at source (already-adopted)', async () => {
+test('sync --adopt recognizes target symlinks already pointing at source', async () => {
   const { source, target } = await createParents()
-  // Already-adopted: source holds a real directory, target has a symlink back to it.
   await mkdir(path.join(source, 'zeta'))
   await mkdir(path.join(source, 'zeta', 'file'))
-  await symlink(path.join(source, 'zeta'), path.join(target, 'zeta'), process.platform === 'win32' ? 'junction' : 'dir')
+  await symlink(path.join(source, 'zeta'), path.join(target, 'zeta'), linkType)
 
   const repeated = await runCli('sync', source, target, '--adopt', '--yes')
-  assert.match(repeated.stdout, /already have matching symlinks/)
-  // Untouched.
+  assert.match(repeated.stdout, /all source project directories already have matching links in target/)
   assert.equal((await lstat(path.join(source, 'zeta'))).isDirectory(), true)
   assert.equal((await lstat(path.join(target, 'zeta'))).isSymbolicLink(), true)
 })
 
-test('sync --adopt handles a mixed batch (real dir + already-linked symlink + source conflict)', async () => {
+test('sync --adopt handles a mixed batch of missing, linked, and target-only projects', async () => {
   const { source, target } = await createParents()
-  // 1. Real directory to adopt.
-  await mkdir(path.join(target, 'adopt-me'))
-  // 2. Target already a symlink pointing to a real source directory (already-adopted).
+  await mkdir(path.join(source, 'missing-link'))
   await mkdir(path.join(source, 'already'))
-  await symlink(path.join(source, 'already'), path.join(target, 'already'), process.platform === 'win32' ? 'junction' : 'dir')
+  await symlink(path.join(source, 'already'), path.join(target, 'already'), linkType)
+  await mkdir(path.join(target, 'adopt-me'))
 
   const result = await runCli('sync', source, target, '--adopt', '--yes')
-  // adopt-me was adopted; already was left alone.
+  assert.match(result.stdout, /created 1 symlink/)
   assert.match(result.stdout, /adopted 1 director/)
+  assert.equal(await readlink(path.join(target, 'missing-link')), path.join(source, 'missing-link'))
   assert.equal((await lstat(path.join(source, 'adopt-me'))).isDirectory(), true)
-  assert.equal((await lstat(path.join(target, 'adopt-me'))).isSymbolicLink(), true)
   assert.equal(await readlink(path.join(target, 'adopt-me')), path.join(source, 'adopt-me'))
-  // already untouched.
-  assert.equal((await lstat(path.join(source, 'already'))).isDirectory(), true)
-  assert.equal((await lstat(path.join(target, 'already'))).isSymbolicLink(), true)
+  assert.equal(await readlink(path.join(target, 'already')), path.join(source, 'already'))
 })
 
-test('sync --adopt requires --force when a source symlink points elsewhere and target is a real directory', async () => {
+test('sync --adopt requires --force before replacing a source symlink', async () => {
   const { source, target } = await createParents()
-  await mkdir(path.join(target, 'eta'))
-  // Source has a symlink to a *different* location, not the target.
   const elsewhere = path.join(path.dirname(source), 'elsewhere')
   await mkdir(elsewhere)
-  await symlink(elsewhere, path.join(source, 'eta'), process.platform === 'win32' ? 'junction' : 'dir')
+  await symlink(elsewhere, path.join(source, 'eta'), linkType)
+  await mkdir(path.join(target, 'eta'))
+  await writeFile(path.join(target, 'eta', 'project'), 'project')
 
   await assert.rejects(
     runCli('sync', source, target, '--adopt', '--yes'),
     (error) => {
-      assert.match(commandOutput(error), /source entries conflict/)
+      assert.match(commandOutput(error), /source entries conflict with directories selected for adoption/)
       return true
     },
   )
-  // Target untouched.
-  assert.equal((await lstat(path.join(target, 'eta'))).isDirectory(), true)
-  // Source symlink untouched.
   assert.equal((await lstat(path.join(source, 'eta'))).isSymbolicLink(), true)
+  assert.equal((await lstat(path.join(target, 'eta'))).isDirectory(), true)
+
+  await runCli('sync', source, target, '--adopt', '--force', '--yes')
+  assert.equal((await lstat(path.join(source, 'eta'))).isDirectory(), true)
+  assert.equal(await exists(path.join(source, 'eta', 'project')), true)
+  assert.equal(await readlink(path.join(target, 'eta')), path.join(source, 'eta'))
 })
 
 async function createParents() {
@@ -237,8 +309,11 @@ async function exists(filePath) {
 
 function commandOutput(error) {
   if (error && typeof error === 'object') {
-    const output = error
-    return `${output.stdout ?? ''}${output.stderr ?? ''}`
+    return `${error.stdout ?? ''}${error.stderr ?? ''}`
   }
   return String(error)
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }

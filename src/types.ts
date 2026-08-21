@@ -22,15 +22,18 @@ export interface MigrationPlan {
 
 export type ConfirmMigration = (plan: MigrationPlan) => Promise<boolean>
 
-export type SyncEntryState = 'missing' | 'linked' | 'conflict' | 'adopt'
+export type SyncEntryState = 'missing' | 'linked' | 'repair' | 'conflict' | 'adopt'
 
 export interface SyncEntry {
+  /** Project basename shared by the source directory and target link. */
   name: string
+  /** Real project path under the source parent. */
   source: string
+  /** Same-named link location under the target parent. */
   target: string
   state: SyncEntryState
   reason?: string
-  /** True when the target entry is a real directory (not a symlink). */
+  /** True when the target entry is a real directory rather than a symlink. */
   targetIsReal?: boolean
 }
 
@@ -41,15 +44,15 @@ export interface SyncPlan {
 }
 
 export interface SyncOptions {
-  /** Replace conflicting source entries with the expected symlink. */
+  /** Replace conflicting target entries with the expected symlink. */
   force: boolean
   /** Skip the confirmation prompt. */
   yes: boolean
   /** Print the links that would be created without writing to disk. */
   dryRun: boolean
   /**
-   * Adopt real (non-symlink) directories found in the target: move them into the
-   * source parent and leave a symlink pointing back from the target.
+   * Adopt real directories found in target: move them into source and leave a
+   * symlink pointing back from target.
    */
   adopt: boolean
 }
@@ -59,8 +62,10 @@ export interface SyncResult {
   source: string
   target: string
   created: string[]
+  /** Target symlinks rewritten to use the source path's exact casing. */
+  repaired: string[]
   alreadyLinked: string[]
-  /** Target-side real directories adopted (moved into the source parent). */
+  /** Source paths of target-side real directories that were adopted. */
   adopted: string[]
   errors: string[]
 }

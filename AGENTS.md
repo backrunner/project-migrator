@@ -29,7 +29,8 @@ with Commander.js and Rollup.
 - The source must be a real directory, not a symlink. Refuse to migrate a
   symlink source.
 - Refuse to move a directory into itself (target must not be inside source).
-- `--force` is required to overwrite an existing target or symlink location.
+- `--force` is required to overwrite an existing target or symlink location,
+  except when `sync` repairs a symlink whose destination differs only by case.
 - Without `--force`, an existing target is an error, not a silent overwrite.
 - Dry-run must not write anything to disk. codex-migrate is invoked in its own
   dry-run mode during a `--dry-run` pass.
