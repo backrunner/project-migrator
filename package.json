@@ -2,7 +2,7 @@
   "name": "@backrunner/project-migrator",
   "type": "module",
   "version": "0.1.0",
-  "packageManager": "pnpm@10.24.0",
+  "packageManager": "pnpm@12.3.4",
   "description": "CLI for migrating project directories to another location while keeping a symlink at the original path, with optional watch mode and Codex history migration integration.",
   "author": "BackRunner <dev@backrunner.top>",
   "license": "MIT",
